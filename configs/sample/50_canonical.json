@@ -1,0 +1,34 @@
+{
+  "id": "sample_50_canonical",
+  "version": "v1",
+  "NOW_DATETIME": "yyyy.mm.dd.T.h.m.sZ",
+  "description": "Exemple : canonical long-format 40_transfo → 50_canonical",
+  "input": {
+    "input_directory": "data/sample/40_transfo",
+    "timestamp_column": "Time",
+    "search_in_subdirectory": "yes",
+    "file_pattern": "*.parquet",
+    "from": "yyyy-mm-ddTh:m:sZ",
+    "to": "yyyy-mm-ddTh:m:sZ",
+    "except": ""
+  },
+  "output": {
+    "clear": true,
+    "compression": "snappy",
+    "output_directory": "data/sample/50_canonical",
+    "timestamp_column": "ts",
+    "output_file_prefix": "",
+    "output_file_suffix": "_canonical_{NOW_DATETIME}",
+    "decimal_places": { "default": 3 }
+  },
+  "timestamp_column": "Time",
+  "device_id": "device-01",
+  "domain_columns": {
+    "bio_signal": ["m0", "m1", "m0_log", "m1_log"],
+    "environment": ["outdoor_temp", "temp_fahrenheit"]
+  },
+  "unit_map": {
+    "outdoor_temp": "°C",
+    "temp_fahrenheit": "°F"
+  }
+}

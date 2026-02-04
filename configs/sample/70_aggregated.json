@@ -1,0 +1,28 @@
+{
+  "id": "sample_70_aggregated",
+  "version": "v1",
+  "NOW_DATETIME": "yyyy.mm.dd.T.h.m.sZ",
+  "description": "Exemple : aggregation 55_resampled → 70_aggregated",
+  "input": {
+    "input_directory": "data/sample/55_resampled",
+    "timestamp_column": "ts",
+    "search_in_subdirectory": "yes",
+    "file_pattern": "*.parquet",
+    "from": "yyyy-mm-ddTh:m:sZ",
+    "to": "yyyy-mm-ddTh:m:sZ",
+    "except": ""
+  },
+  "output": {
+    "clear": true,
+    "compression": "snappy",
+    "output_directory": "data/sample/70_aggregated",
+    "output_file_prefix": "",
+    "output_file_suffix": "_agg10s_{NOW_DATETIME}",
+    "decimal_places": { "default": 3 }
+  },
+  "aggregation_level": "10s",
+  "metrics_aggregation": {
+    "m0": [{ "method": "median", "output": "c0" }],
+    "m1": [{ "method": "median", "output": "c1" }]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "id": "sample_20_split",
+  "version": "v1",
+  "NOW_DATETIME": "yyyy.mm.dd.T.h.m.sZ",
+  "description": "Exemple : split staged par domaine",
+  "input": {
+    "input_directory": "data/sample/10_staged",
+    "timestamp_column": "Time",
+    "search_in_subdirectory": "yes",
+    "file_pattern": "*.parquet",
+    "from": "yyyy-mm-ddTh:m:sZ",
+    "to": "yyyy-mm-ddTh:m:sZ",
+    "except": ""
+  },
+  "output": {
+    "clear": true,
+    "output_directory": "data/sample/20_split",
+    "output_file_prefix": "",
+    "output_file_suffix": "split_{NOW_DATETIME}",
+    "compression": "snappy",
+    "partition_by": ["day"],
+    "engine": "pyarrow"
+  },
+  "domain_columns": {
+    "bio_signal": ["m0", "m1"],
+    "environment": ["outdoor_temp"]
+  }
+}

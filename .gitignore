@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Logs et archives
+logs/*.log
+ARCHIVES/
+_ARCH
+data/PREMANIP_GRACE/*
+configs/PREMANIP_GRACE/*
+
+# Données (data : Parquet, CSV générés)
+data/*/*.parquet
+data/*/*/*.parquet
+data/*/*/*/*.parquet
+data/*/*.csv
+data/*/*/*.csv
+data/*/*/*/*.csv
+
+# IDE / éditeur
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Cursor (optionnel : retirer si vous voulez versionner les règles)
+.cursor/debug.log
+
+# Pytest / tests
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db

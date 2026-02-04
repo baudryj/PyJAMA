@@ -1,0 +1,13 @@
+{
+  "drawer": "sample",
+  "description": "Pipeline exemple : raw → staged → split → clean → transfo → canonical → resampled → aggregated",
+  "items": [
+    { "run": "10_parser.py", "with": "configs/sample/10_parser.json" },
+    { "run": "20_split.py", "with": "configs/sample/20_split.json" },
+    { "run": "30_clean.py", "with": "configs/sample/30_clean.json" },
+    { "run": "40_transfo.py", "with": "configs/sample/40_transfo.json" },
+    { "run": "50_canonical.py", "with": "configs/sample/50_canonical.json" },
+    { "run": "55_resample.py", "with": "configs/sample/55_resample.json" },
+    { "run": "70_aggregated.py", "with": "configs/sample/70_aggregated.json" }
+  ]
+}

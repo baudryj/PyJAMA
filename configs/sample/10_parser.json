@@ -1,0 +1,29 @@
+{
+  "id": "sample_10_parser",
+  "version": "v1",
+  "NOW_DATETIME": "yyyy.mm.dd.T.h.m.sZ",
+  "description": "Exemple : parsing raw → staged",
+  "input": {
+    "input_directory": "data/sample/00_raw",
+    "timestamp_column": "Time",
+    "search_in_subdirectory": "no",
+    "file_pattern": "*.csv",
+    "from": "yyyy-mm-ddTh:m:sZ",
+    "to": "yyyy-mm-ddTh:m:sZ",
+    "except": "",
+    "dedup": true,
+    "filter_by_file_date": true
+  },
+  "output": {
+    "clear": true,
+    "output_directory": "data/sample/10_staged",
+    "output_file_prefix": "",
+    "output_file_suffix": "staged_{NOW_DATETIME}",
+    "compression": "snappy",
+    "partition_by": ["day"],
+    "engine": "pyarrow",
+    "decimal_places": { "default": 3 },
+    "file_name_substitute": { "src": "sample", "target": "sample" }
+  },
+  "rules_and_filters": {}
+}

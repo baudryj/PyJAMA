@@ -1,0 +1,40 @@
+{
+  "id": "sample_55_resample",
+  "version": "v1",
+  "NOW_DATETIME": "yyyy.mm.dd.T.h.m.sZ",
+  "description": "Exemple : resample 50_canonical → 55_resampled",
+  "input": {
+    "input_directory": "data/sample/50_canonical",
+    "timestamp_column": "ts",
+    "search_in_subdirectory": "yes",
+    "file_pattern": "*.parquet",
+    "from": "yyyy-mm-ddTh:m:sZ",
+    "to": "yyyy-mm-ddTh:m:sZ",
+    "except": ""
+  },
+  "output": {
+    "clear": true,
+    "compression": "snappy",
+    "output_directory": "data/sample/55_resampled",
+    "output_file_prefix": "",
+    "output_file_suffix": "_resampled_{NOW_DATETIME}",
+    "decimal_places": { "default": 3 }
+  },
+  "resample_by_domain": {
+    "bio_signal": {
+      "freq": "1s",
+      "interpolation": "forward",
+      "independent_by_day": true
+    },
+    "environment": {
+      "freq": "1m",
+      "interpolation": "forward",
+      "independent_by_day": true
+    },
+    "telemetry": {
+      "freq": "5m",
+      "interpolation": "nearest",
+      "independent_by_day": true
+    }
+  }
+}

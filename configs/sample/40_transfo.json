@@ -1,0 +1,32 @@
+{
+  "id": "sample_40_transfo",
+  "version": "v1",
+  "NOW_DATETIME": "yyyy.mm.dd.T.h.m.sZ",
+  "description": "Exemple : transfo 30_clean par domaine",
+  "input": {
+    "input_directory": "data/sample/30_clean",
+    "timestamp_column": "Time",
+    "search_in_subdirectory": "yes",
+    "file_pattern": "*.parquet",
+    "from": "yyyy-mm-ddTh:m:sZ",
+    "to": "yyyy-mm-ddTh:m:sZ",
+    "except": ""
+  },
+  "output": {
+    "clear": true,
+    "compression": "snappy",
+    "output_directory": "data/sample/40_transfo",
+    "output_file_prefix": "",
+    "output_file_suffix": "_transfo_{NOW_DATETIME}",
+    "decimal_places": { "default": 6 }
+  },
+  "domain_transfo": {
+    "bio_signal": {
+      "m0": { "m0_log": "log" },
+      "m1": { "m1_log": "log" }
+    },
+    "environment": {
+      "outdoor_temp": { "temp_fahrenheit": "celsius_to_fahrenheit" }
+    }
+  }
+}

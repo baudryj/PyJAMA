@@ -1,0 +1,60 @@
+---
+description: Conventions de données PyJAMA (timestamps UTC Z, nommage, format des fichiers)
+alwaysApply: true
+---
+
+# Conventions de données PyJAMA
+
+## Timestamps
+
+- **Format unique** : tous les timestamps doivent être au format **UTC avec suffixe Z** : `YYYY-MM-DDTHH:MM:SSZ` (ex. `2026-01-21T00:00:00Z`).
+- **Colonnes concernées** : `Time` (étapes 10 à 40, format large), `ts` (50_canonical, 55_resampled, 70_aggregated, format long). Le nom peut être surchargé par la config (voir ci‑dessous).
+- **À l’écriture** : avant tout `write_parquet`, normaliser la colonne timestamp avec le helper `format_timestamp_column_utc_z(df, col_name)` (défini dans `scripts/format_ts.py`), où `col_name` est la colonne effectivement écrite (input ou output.timestamp_column).
+- **À la lecture** : accepter les formats ISO courants ; en sortie, toujours écrire en `YYYY-MM-DDTHH:MM:SSZ`. Ne pas écrire de datetime sans timezone ou avec un autre format (ex. `+00:00` à la place de `Z`).
+
+## Colonne timestamp (input / output)
+
+- **Entrée** : à chaque étape, `input.timestamp_column` (ou `timestamp_column` à la racine pour 50_canonical en entrée large) indique le nom de la colonne timestamp à lire. Défaut : `"Time"` (étapes 10–40), `"ts"` (50, 55, 70).
+- **Sortie** : `output.timestamp_column` (optionnel) indique le nom de la colonne timestamp à écrire. Si absent, on garde le même nom qu’en entrée (sauf 50_canonical dont la sortie long est par défaut `"ts"`).
+- **Cohérence** : si une étape renomme en sortie (ex. `output.timestamp_column: "datetime_utc"`), l’étape suivante ou le système cible doit utiliser ce nom en entrée (`input.timestamp_column: "datetime_utc"`). Utile en fin de pipeline pour alimenter d’autres systèmes.
+
+## Nommage des fichiers de sortie
+
+- **Structure** : `(prefix_)base_stem(_suffix).parquet` sans double soulignement.
+- **Suffixe** : utiliser le placeholder `{NOW_DATETIME}` dans la config ; remplacer par `datetime.utcnow().strftime("%Y.%m.%d.T.%H.%M.%SZ")` à l’exécution (ex. `_clean_2026.02.02.T.10.30.29Z`).
+- **Préfixe** : optionnel ; si présent, séparer de `base_stem` par un seul `_`.
+- **Extension** : toujours `.parquet` en sortie du pipeline.
+
+## Lecture / écriture (pipeline full Parquet)
+
+- **Entrée** : chaque étape accepte CSV et Parquet selon l’extension du fichier (`.parquet` → `pl.read_parquet`, sinon `pl.read_csv` avec `null_values="NaN"` si pertinent).
+- **Sortie** : toutes les étapes du pipeline écrivent **uniquement en Parquet** (`write_parquet`, `compression` ex. `snappy`). Pour obtenir du CSV, utiliser l’utilitaire `scripts/parquet_to_csv.py` (config input/output, option `decimal_places` pour le formatage des floats).
+- **Plage temporelle** : pour le filtrage `from`/`to`, lire min/max sur la colonne temps configurée (`input.timestamp_column`) ; pour les Parquet, utiliser `pl.scan_parquet(path).select(pl.col(nom_colonne).min(), pl.col(nom_colonne).max()).collect()` avec le nom indiqué en config.
+
+## quality_flag (colonnes de qualité)
+
+- **Codes** : 0 = OK, 1 = Manquant, 2 = Spike, 3 = Hors plage, 4 = Capteur déconnecté, 5 = Valeur estimée (interpolée), 6 = Valeur corrigée manuellement.
+- **Étapes** : 30_clean ajoute `quality_flag` ; 55_resampled met à jour (ex. 5 pour interpolé, 1 pour manquant).
+
+## output_columns (filtre et renommage en sortie)
+
+- **Schéma** : dans `output`, `output_columns` est optionnel (liste de chaînes). Si présent, seules les colonnes concernées **et** présentes dans le DataFrame sont écrites ; les colonnes listées mais absentes sont ignorées (pas d’erreur). Si absent ou vide : toutes les colonnes sont écrites.
+- **Chaque élément** peut être :
+  - un **nom de colonne** : la colonne est écrite sous ce nom (pas de renommage) ;
+  - une forme **`ancien->nouveau`** : la colonne `ancien` est écrite sous le nom `nouveau`.
+- **Où s’applique** : toutes les étapes (10_parser, 20_split, 30_clean, 40_transfo, 50_canonical, 55_resample, 70_aggregated), en dernier avant `write_parquet` (règle générique et globale).
+
+## decimal_places (précision décimale déclarative)
+
+- **Schéma** : dans `output`, `decimal_places` est optionnel. Il peut être :
+  - un **objet** `{ "nom_variable": n, "default": n }` : précision par variable (nom de colonne en 10_parser / 40_transfo, nom de metric en 50_canonical / 55_resample), avec fallback `default` si une variable n’a pas de clé ;
+  - un **entier** (legacy) : même précision pour toutes les variables.
+- **Où s’applique** : 10_parser, 40_transfo (par colonne float), 50_canonical, 55_resample (par metric sur la colonne `value`), 70_aggregated (par colonne float en sortie wide). 20_split n’utilise pas `decimal_places`.
+- **Dans le pipeline** : uniquement **arrondi** (`round(n)`) avant `write_parquet`. Le formatage string pour CSV est géré par l’utilitaire `parquet_to_csv.py` si besoin.
+
+## Références
+
+- **Helper timestamps** : `scripts/format_ts.py` — `format_timestamp_column_utc_z(df, col_name)`.
+- **Utilitaire CSV** : `scripts/parquet_to_csv.py` — conversion Parquet → CSV (config input/output, option `decimal_places`).
+- **Structure des étapes et domaines** : `data/<EXPOSURE_NAME>/llm.txt` (ex. PREMANIP_GRACE/llm.txt).
+- **70_aggregated** : entrée 55_resampled (long) ; sortie Parquet wide (ts, device_id, domain + colonnes agrégées par metric/méthode) ; `aggregation_level`, `metrics_aggregation` (median, average), `output_columns` ; métrique absente = ignorée.

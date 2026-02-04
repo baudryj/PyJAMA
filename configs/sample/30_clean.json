@@ -1,0 +1,32 @@
+{
+  "id": "sample_30_clean",
+  "version": "v1",
+  "NOW_DATETIME": "yyyy.mm.dd.T.h.m.sZ",
+  "description": "Exemple : clean 20_split par domaine",
+  "input": {
+    "input_directory": "data/sample/20_split",
+    "timestamp_column": "Time",
+    "search_in_subdirectory": "yes",
+    "file_pattern": "*.parquet",
+    "from": "yyyy-mm-ddTh:m:sZ",
+    "to": "yyyy-mm-ddTh:m:sZ",
+    "except": ""
+  },
+  "output": {
+    "clear": true,
+    "compression": "snappy",
+    "output_directory": "data/sample/30_clean",
+    "output_file_prefix": "",
+    "output_file_suffix": "_clean_{NOW_DATETIME}",
+    "add_quality_column": true
+  },
+  "domain_rules": {
+    "bio_signal": {
+      "m0": { "type": "int", "min": 0, "max": 20, "max_diff": 5 },
+      "m1": { "type": "int", "min": 0, "max": 20, "max_diff": 5 }
+    },
+    "environment": {
+      "outdoor_temp": { "type": "float", "min": -30, "max": 60, "max_diff": 10 }
+    }
+  }
+}
