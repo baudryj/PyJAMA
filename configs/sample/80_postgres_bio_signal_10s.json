@@ -1,0 +1,61 @@
+{
+  "id": "sample_80_postgres_bio_signal_10s",
+  "version": "v1",
+  "description": "Exemple : import 70_aggregated → PostgreSQL (bio_signal, agg 10s)",
+  "drawer": "SAMPLE",
+  "input": {
+    "input_directory": "data/sample/70_aggregated/domain=bio_signal",
+    "timestamp_column": "ts",
+    "search_in_subdirectory": "no",
+    "file_pattern": "*.parquet",
+    "from": "yyyy-mm-ddTh:m:sZ",
+    "to": "yyyy-mm-ddTh:m:sZ",
+    "except": ""
+  },
+  "output": {
+    "database": {
+      "driver": "postgres",
+      "table_name": "SAMPLE_bio_signal_10s",
+      "parameters": {
+        "host": "localhost",
+        "port": 5432,
+        "dbname": "pyjama_sample",
+        "user": "pyjama_sample"
+      },
+      "password_env": "POSTGRES_PASSWORD",
+      "autocreate": true,
+      "destroy": false,
+      "policy": "replace",
+      "schema": {
+        "timestamp_column": "ts",
+        "device_id_column": "device_id",
+        "domain_column": "domain",
+        "sensor_column": "sensor",
+        "value_column": "value"
+      },
+      "value_type": "numeric",
+      "value_precision": 18,
+      "value_scale": 6,
+      "column_to_sensor": {
+        "c0": "m0",
+        "c1": "m1",
+        "c2": "m2"
+      },
+      "indexes": [
+        {
+          "name": "sample_bio_signal_10s_idx_ts",
+          "columns": ["ts"],
+          "method": "btree",
+          "unique": false
+        },
+        {
+          "name": "sample_bio_signal_10s_idx_device_ts",
+          "columns": ["device_id", "ts"],
+          "method": "btree",
+          "unique": false
+        }
+      ]
+    }
+  }
+}
+
