@@ -214,10 +214,13 @@ def ensure_table(
     value_precision: Optional[int] = None,
     value_scale: Optional[int] = None,
     ts_type: str = "TIMESTAMPTZ",
+    schema: Optional[Dict[str, str]] = None,
+    indexes: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
-    Crée la table si elle n'existe pas (ts, device_id, domain, sensor, value).
-    Index : (ts), (device_id, ts).
+    Crée la table si elle n'existe pas.
+    Schéma par défaut : ts, device_id, domain, sensor, value.
+    Index par défaut : (ts), (device_id, ts).
     """
     value_col_def = "INTEGER"
     if value_sql_type == "numeric" and value_precision is not None and value_scale is not None:
@@ -225,41 +228,76 @@ def ensure_table(
     elif value_sql_type == "numeric":
         value_col_def = "NUMERIC(18,6)"
 
+    # Colonnes de la table (schéma configurable)
+    schema = schema or {}
+    ts_col = schema.get("timestamp_column", "ts")
+    device_id_col = schema.get("device_id_column", "device_id")
+    domain_col = schema.get("domain_column", "domain")
+    sensor_col = schema.get("sensor_column", "sensor")
+    value_col = schema.get("value_column", "value")
+
     # Identifier PostgreSQL : noms entre guillemets pour préserver la casse si besoin
     safe_table = f'"{table_name}"' if not table_name.islower() else table_name
     create_sql = f"""
     CREATE TABLE IF NOT EXISTS {safe_table} (
-        ts {ts_type} NOT NULL,
-        device_id VARCHAR(255) NOT NULL,
-        domain VARCHAR(255) NOT NULL,
-        sensor VARCHAR(255) NOT NULL,
-        value {value_col_def}
+        {ts_col} {ts_type} NOT NULL,
+        {device_id_col} VARCHAR(255) NOT NULL,
+        {domain_col} VARCHAR(255) NOT NULL,
+        {sensor_col} VARCHAR(255) NOT NULL,
+        {value_col} {value_col_def}
     );
     """
     with conn.cursor() as cur:
         cur.execute(create_sql)
     conn.commit()
 
-    # Index pour requêtes temps + device (Grafana)
-    idx_ts = f'"{table_name}_idx_ts"' if not table_name.islower() else f"{table_name}_idx_ts"
-    idx_device_ts = f'"{table_name}_idx_device_ts"' if not table_name.islower() else f"{table_name}_idx_device_ts"
+    # Index pour requêtes temps + device (Grafana), configurables
+    if indexes is None:
+        # Défaut : index sur ts et sur (device_id, ts)
+        default_indexes = [
+            {
+                "name": f"{table_name}_idx_ts",
+                "columns": [ts_col],
+                "method": "btree",
+                "unique": False,
+            },
+            {
+                "name": f"{table_name}_idx_device_ts",
+                "columns": [device_id_col, ts_col],
+                "method": "btree",
+                "unique": False,
+            },
+        ]
+    else:
+        default_indexes = indexes
+
     with conn.cursor() as cur:
-        cur.execute(f"""
-            CREATE INDEX IF NOT EXISTS {idx_ts} ON {safe_table} (ts);
-        """)
-        cur.execute(f"""
-            CREATE INDEX IF NOT EXISTS {idx_device_ts} ON {safe_table} (device_id, ts);
-        """)
+        for idx in default_indexes:
+            name = idx.get("name")
+            cols = idx.get("columns") or []
+            method = idx.get("method", "btree")
+            unique = bool(idx.get("unique", False))
+            if not name or not cols:
+                continue
+
+            safe_idx = f'"{name}"' if not name.islower() else name
+            cols_sql = ", ".join(cols)
+            unique_sql = "UNIQUE " if unique else ""
+            cur.execute(
+                f"CREATE {unique_sql}INDEX IF NOT EXISTS {safe_idx} "
+                f"ON {safe_table} USING {method} ({cols_sql});"
+            )
     conn.commit()
     logger.info(f"Table {table_name} prête (index ts, device_id+ts)")
 
 
-def delete_replace_range(conn: Any, table_name: str, min_ts: str, max_ts: str) -> int:
-    """Supprime les lignes dont ts est dans [min_ts, max_ts]. Retourne le nombre de lignes supprimées."""
+def delete_replace_range(conn: Any, table_name: str, ts_column: str, min_ts: str, max_ts: str) -> int:
+    """Supprime les lignes dont ts_column est dans [min_ts, max_ts]. Retourne le nombre de lignes supprimées."""
     safe_table = f'"{table_name}"' if not table_name.islower() else table_name
+    safe_ts_col = f'"{ts_column}"' if not ts_column.islower() else ts_column
     with conn.cursor() as cur:
         cur.execute(
-            f"DELETE FROM {safe_table} WHERE ts >= %s AND ts <= %s",
+            f"DELETE FROM {safe_table} WHERE {safe_ts_col} >= %s AND {safe_ts_col} <= %s",
             (min_ts, max_ts),
         )
         deleted = cur.rowcount
@@ -267,15 +305,26 @@ def delete_replace_range(conn: Any, table_name: str, min_ts: str, max_ts: str) -
     return deleted or 0
 
 
-def insert_rows(conn: Any, table_name: str, df: pl.DataFrame) -> int:
-    """Insère les lignes du DataFrame (colonnes ts, device_id, domain, sensor, value). Retourne le nombre inséré."""
+def insert_rows(conn: Any, table_name: str, df: pl.DataFrame, schema: Optional[Dict[str, str]] = None) -> int:
+    """Insère les lignes du DataFrame (colonnes internes ts, device_id, domain, sensor, value) dans la table cible.
+    Le mapping vers les noms de colonnes SQL est configurable via schema.
+    """
     if df.height == 0:
         return 0
     safe_table = f'"{table_name}"' if not table_name.islower() else table_name
+
+    schema = schema or {}
+    ts_col = schema.get("timestamp_column", "ts")
+    device_id_col = schema.get("device_id_column", "device_id")
+    domain_col = schema.get("domain_column", "domain")
+    sensor_col = schema.get("sensor_column", "sensor")
+    value_col = schema.get("value_column", "value")
+
     rows = df.to_dicts()
     with conn.cursor() as cur:
         cur.executemany(
-            f"INSERT INTO {safe_table} (ts, device_id, domain, sensor, value) VALUES (%s, %s, %s, %s, %s)",
+            f"INSERT INTO {safe_table} ({ts_col}, {device_id_col}, {domain_col}, {sensor_col}, {value_col}) "
+            f"VALUES (%s, %s, %s, %s, %s)",
             [
                 (
                     r.get("ts"),
@@ -531,8 +580,25 @@ def run(config: Dict) -> Dict:
     combined = pl.concat(frames)
     total_rows_after = combined.height
 
-    # Inférer le type value pour la table
+    # Inférer le type value pour la table (modifiable par config)
     value_type, value_prec, value_scale = infer_value_type(combined, "value")
+
+    # Surcharges éventuelles depuis la configuration :
+    # - value_type: "int" / "integer" / "numeric"
+    # - value_precision, value_scale: pour NUMERIC(p,s)
+    cfg_value_type = db_cfg.get("value_type")
+    if isinstance(cfg_value_type, str):
+        cfg_value_type_lower = cfg_value_type.strip().lower()
+        if cfg_value_type_lower in ("int", "integer"):
+            value_type, value_prec, value_scale = "int", None, None
+        elif cfg_value_type_lower == "numeric":
+            value_type = "numeric"
+            if "value_precision" in db_cfg and "value_scale" in db_cfg:
+                try:
+                    value_prec = int(db_cfg["value_precision"])
+                    value_scale = int(db_cfg["value_scale"])
+                except (TypeError, ValueError):
+                    pass
 
     try:
         import psycopg2
@@ -560,7 +626,21 @@ def run(config: Dict) -> Dict:
 
     try:
         autocreate = db_cfg.get("autocreate", True)
-        if autocreate:
+        destroy = bool(db_cfg.get("destroy", False))
+
+        # Schéma et index configurables pour la table cible
+        schema_cfg = db_cfg.get("schema") or {}
+        indexes_cfg = db_cfg.get("indexes")
+
+        # Option destroy: drop complet de la table, puis recréation
+        if destroy:
+            safe_table = f'"{table_name}"' if not table_name.islower() else table_name
+            with conn.cursor() as cur:
+                cur.execute(f"DROP TABLE IF EXISTS {safe_table}")
+            conn.commit()
+            logger.info(f"Option destroy=True : table {table_name} supprimée avant recréation")
+
+            # En mode destroy, on force la recréation même si autocreate est False
             ensure_table(
                 conn,
                 table_name,
@@ -568,6 +648,19 @@ def run(config: Dict) -> Dict:
                 value_precision=value_prec,
                 value_scale=value_scale,
                 ts_type="TIMESTAMPTZ",
+                schema=schema_cfg,
+                indexes=indexes_cfg,
+            )
+        elif autocreate:
+            ensure_table(
+                conn,
+                table_name,
+                value_type,
+                value_precision=value_prec,
+                value_scale=value_scale,
+                ts_type="TIMESTAMPTZ",
+                schema=schema_cfg,
+                indexes=indexes_cfg,
             )
 
         policy = db_cfg.get("policy", "replace")
@@ -576,8 +669,11 @@ def run(config: Dict) -> Dict:
         min_ts_str = str(ts_min) if ts_min is not None else None
         max_ts_str = str(ts_max) if ts_max is not None else None
 
+        # Colonne timestamp côté SQL (par défaut "ts")
+        ts_db_col = schema_cfg.get("timestamp_column", "ts")
+
         if policy == "replace" and min_ts_str and max_ts_str:
-            deleted = delete_replace_range(conn, table_name, min_ts_str, max_ts_str)
+            deleted = delete_replace_range(conn, table_name, ts_db_col, min_ts_str, max_ts_str)
             logger.info(f"Policy replace: {deleted} lignes supprimées dans [{min_ts_str}, {max_ts_str}]")
         elif policy == "replace_all":
             safe_table = f'"{table_name}"' if not table_name.islower() else table_name
@@ -586,7 +682,7 @@ def run(config: Dict) -> Dict:
             conn.commit()
             logger.info(f"Policy replace_all: table {table_name} vidée")
 
-        inserted = insert_rows(conn, table_name, combined)
+        inserted = insert_rows(conn, table_name, combined, schema=schema_cfg)
         logger.info(f"Insertion: {inserted} lignes dans {table_name}")
     finally:
         conn.close()
@@ -598,6 +694,36 @@ def run(config: Dict) -> Dict:
         "total_rows_before": total_rows_before,
         "total_rows_after": total_rows_after,
     }
+
+    # #region agent log
+    try:
+        import json as _json
+        from datetime import datetime as _dt
+
+        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as _f:
+            _f.write(
+                _json.dumps(
+                    {
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "H1-H3",
+                        "location": "80_import_postgres.py:run:return",
+                        "message": "summary_structure",
+                        "data": {
+                            "total_files": summary.get("total_files"),
+                            "processed_count": len(summary.get("processed_files", [])),
+                            "failed_count": len(summary.get("failed_files", [])),
+                            "failed_files_sample": summary.get("failed_files", [])[:3],
+                        },
+                        "timestamp": int(_dt.utcnow().timestamp() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
     logger.info(
         f"80_import_postgres terminé: {len(processed_reports)} fichiers traités, {len(failed_reports)} échecs, {total_rows_after} lignes en base"
     )

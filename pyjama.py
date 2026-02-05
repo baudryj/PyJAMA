@@ -189,19 +189,127 @@ def print_summary(summary: Dict):
     print(f"Fichiers en échec: {len(summary.get('failed_files', []))}")
     print(f"Lignes avant traitement: {summary.get('total_rows_before', 0)}")
     print(f"Lignes après traitement: {summary.get('total_rows_after', 0)}")
+
+    # region agent log
+    try:
+        from pathlib import Path as _Path
+        import json as _json
+        import time as _time
+
+        _debug_path = _Path(__file__).resolve().parent / ".cursor" / "debug.log"
+        _debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(_debug_path, "a", encoding="utf-8") as _f:
+            _f.write(
+                _json.dumps(
+                    {
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "H1-H3",
+                        "location": "pyjama.py:print_summary:entry",
+                        "message": "print_summary_entry",
+                        "data": {
+                            "has_processed_files": bool(summary.get("processed_files")),
+                            "has_failed_files": bool(summary.get("failed_files")),
+                            "failed_files_sample": summary.get("failed_files", [])[:3],
+                        },
+                        "timestamp": int(_time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        # Ne jamais faire échouer le traitement à cause du logging de debug
+        pass
+    # endregion
     
-    if summary.get('processed_files'):
+    processed_files = summary.get('processed_files') or []
+    failed_files = summary.get('failed_files') or []
+
+    if processed_files:
         print("\nFichiers traités:")
-        for report in summary['processed_files']:
+        for report in processed_files:
             out = report.get('output_file')
             out_label = Path(out).name if out else "base de données"
-            print(f"  ✓ {Path(report['input_file']).name} -> {out_label}")
+            input_name = report.get('input_file')
+            if input_name:
+                display_input = Path(input_name).name
+            else:
+                # Cas dégradé : certains rapports d'erreur globaux n'ont pas de input_file
+                display_input = "<inconnu>"
+
+            # region agent log
+            try:
+                from pathlib import Path as _Path
+                import json as _json
+                import time as _time
+
+                _debug_path = _Path(__file__).resolve().parent / ".cursor" / "debug.log"
+                _debug_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(_debug_path, "a", encoding="utf-8") as _f:
+                    _f.write(
+                        _json.dumps(
+                            {
+                                "sessionId": "debug-session",
+                                "runId": "run1",
+                                "hypothesisId": "H2",
+                                "location": "pyjama.py:print_summary:processed_loop",
+                                "message": "processed_report",
+                                "data": {
+                                    "has_input_file": bool(input_name),
+                                    "keys": list(report.keys()),
+                                },
+                                "timestamp": int(_time.time() * 1000),
+                            }
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
+            # endregion
+
+            print(f"  ✓ {display_input} -> {out_label}")
             print(f"    {report.get('rows_before', 0)} lignes -> {report.get('rows_after', 0)} lignes")
     
-    if summary.get('failed_files'):
+    if failed_files:
         print("\nFichiers en échec:")
-        for report in summary['failed_files']:
-            print(f"  ✗ {Path(report['input_file']).name}")
+        for report in failed_files:
+            input_name = report.get('input_file')
+            if input_name:
+                display_input = Path(input_name).name
+            else:
+                display_input = "<global>"
+
+            # region agent log
+            try:
+                from pathlib import Path as _Path
+                import json as _json
+                import time as _time
+
+                _debug_path = _Path(__file__).resolve().parent / ".cursor" / "debug.log"
+                _debug_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(_debug_path, "a", encoding="utf-8") as _f:
+                    _f.write(
+                        _json.dumps(
+                            {
+                                "sessionId": "debug-session",
+                                "runId": "run1",
+                                "hypothesisId": "H1-H3",
+                                "location": "pyjama.py:print_summary:failed_loop",
+                                "message": "failed_report",
+                                "data": {
+                                    "has_input_file": bool(input_name),
+                                    "keys": list(report.keys()),
+                                },
+                                "timestamp": int(_time.time() * 1000),
+                            }
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
+            # endregion
+
+            print(f"  ✗ {display_input}")
             print(f"    Erreur: {report.get('error', 'Inconnue')}")
     
     print("=" * 60 + "\n")
