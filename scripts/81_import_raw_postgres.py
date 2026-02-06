@@ -193,6 +193,8 @@ def _auto_mode_filter_files_by_missing_days(
     """
     En mode auto, ne conserve que les fichiers dont le jour n'est pas présent dans la table.
     """
+    safe_table = f'"{table_name}"' if not table_name.islower() else table_name
+
     # Collecter les jours connus à partir des fichiers
     candidate_days = sorted({d for d in file_days.values() if d is not None})
     if not candidate_days:
@@ -202,7 +204,7 @@ def _auto_mode_filter_files_by_missing_days(
     placeholders = ", ".join(["%s"] * len(candidate_days))
     query = (
         f"SELECT DISTINCT DATE({ts_column_db}) AS day_present "
-        f"FROM {table_name} WHERE DATE({ts_column_db}) IN ({placeholders})"
+        f"FROM {safe_table} WHERE DATE({ts_column_db}) IN ({placeholders})"
     )
     present_days: List[date] = []
     with conn.cursor() as cur:
@@ -318,18 +320,23 @@ def ensure_table_raw(
             WHERE table_schema = current_schema()
               AND table_name = %s
             """,
-            (table_name.lower(),),
+            (table_name,),
         )
-        existing_cols = {r[0] for r in cur.fetchall()}
+        # Postgres stocke les noms non quotés en minuscules → comparaison insensible à la casse.
+        existing_cols = {r[0].lower() for r in cur.fetchall()}
+        ts_col_l = ts_col.lower()
+        device_id_col_l = device_id_col.lower()
+        sensor_col_l = sensor_col.lower()
+        value_col_l = value_col.lower()
 
-        # Ajouter les colonnes manquantes si nécessaire
-        if ts_col not in existing_cols:
+        # Ajouter les colonnes manquantes si nécessaire (en tenant compte de la casse)
+        if ts_col_l not in existing_cols:
             cur.execute(f"ALTER TABLE {safe_table} ADD COLUMN {ts_col} TIMESTAMPTZ")
-        if device_id_col not in existing_cols:
+        if device_id_col_l not in existing_cols:
             cur.execute(f"ALTER TABLE {safe_table} ADD COLUMN {device_id_col} TEXT")
-        if sensor_col not in existing_cols:
+        if sensor_col_l not in existing_cols:
             cur.execute(f"ALTER TABLE {safe_table} ADD COLUMN {sensor_col} TEXT")
-        if value_col not in existing_cols:
+        if value_col_l not in existing_cols:
             cur.execute(
                 f"ALTER TABLE {safe_table} ADD COLUMN {value_col} "
                 f"NUMERIC({numeric_precision},{numeric_scale})"
