@@ -18,12 +18,13 @@
     "clear": true,
     "output_directory": "data/sample/10_staged",
     "output_file_prefix": "",
-    "output_file_suffix": "staged_{NOW_DATETIME}",
+    "output_file_suffix": "10_staged_{NOW_DATETIME}",
     "compression": "snappy",
     "partition_by": ["day"],
     "engine": "pyarrow",
     "decimal_places": { "default": 3 },
-    "file_name_substitute": { "src": "sample", "target": "sample" }
-  },
-  "rules_and_filters": {}
+    "file_name_substitute": [
+      { "src": "sample", "target": "sample" }
+    ]
+  }
 }

@@ -124,53 +124,6 @@ def normalize_timestamps(df: pl.DataFrame, time_column: str = "Time") -> pl.Data
     return df
 
 
-def apply_rules_staged(df: pl.DataFrame, rules: Dict) -> pl.DataFrame:
-    """
-    Applique sélection de colonnes, types et min/max → null.
-    Pas de forward_fill ni drop_nulls (staged reste proche du raw).
-    """
-    rules = rules or {}
-    if not rules:
-        logger.info("rules_and_filters vide : toutes les colonnes conservées.")
-        return df
-
-    columns_to_keep = ["Time"] + list(rules.keys())
-    existing = [c for c in columns_to_keep if c in df.columns]
-    missing = [c for c in columns_to_keep if c not in df.columns]
-    if missing:
-        logger.warning(f"Colonnes absentes des données: {missing}")
-
-    df = df.select(existing)
-    logger.info(f"Colonnes conservées: {existing}")
-
-    for col_name, rule in rules.items():
-        if col_name not in df.columns:
-            continue
-        if "type" in rule:
-            target_type = rule["type"]
-            if target_type == "int":
-                df = df.with_columns(pl.col(col_name).cast(pl.Int64, strict=False))
-            elif target_type == "float":
-                df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
-        if "min" in rule:
-            min_val = rule["min"]
-            df = df.with_columns(
-                pl.when(pl.col(col_name) < min_val)
-                .then(None)
-                .otherwise(pl.col(col_name))
-                .alias(col_name)
-            )
-        if "max" in rule:
-            max_val = rule["max"]
-            df = df.with_columns(
-                pl.when(pl.col(col_name) > max_val)
-                .then(None)
-                .otherwise(pl.col(col_name))
-                .alias(col_name)
-            )
-    return df
-
-
 def dedup(df: pl.DataFrame, subset: Optional[List[str]] = None) -> pl.DataFrame:
     """Supprime les lignes dupliquées (toutes les colonnes ou subset)."""
     n_before = df.height
@@ -221,7 +174,7 @@ def get_file_timestamp_range(path: Path) -> Tuple[Optional[datetime], Optional[d
 
 def process_single_file(input_path: Path, config: Dict) -> Tuple[Optional[Path], Dict]:
     """
-    Traite un fichier raw : load → normalize_ts → dedup → rules (optionnel) → write CSV.
+    Traite un fichier raw : load → normalize_ts → dedup → write Parquet.
     Retourne (chemin_sortie, rapport) avec rapport au format attendu par pyjama.
     """
     logger.info(f"Traitement du fichier: {input_path.name}")
@@ -262,10 +215,6 @@ def process_single_file(input_path: Path, config: Dict) -> Tuple[Optional[Path],
             dedup_cols = config.get("output", {}).get("dedup_columns")
             df = dedup(df, subset=dedup_cols)
 
-        rules = config.get("rules_and_filters", {})
-        if rules:
-            df = apply_rules_staged(df, rules)
-
         output_cfg = config["output"]
         output_dir = Path(output_cfg["output_directory"])
         if not output_dir.is_absolute():
@@ -278,16 +227,46 @@ def process_single_file(input_path: Path, config: Dict) -> Tuple[Optional[Path],
         suffix_with_now = suffix.replace("{NOW_DATETIME}", now_str)
 
         def build_filename() -> str:
+            """
+            Nommage standardisé à partir de 10_staged :
+            <experience>_<device_id>_<date_day>_<step>_<generated_at>.parquet
+
+            - experience / device_id / date_day sont inférés du nom brut du fichier d'entrée :
+              <experience>_<device_id>_<date_day>_...
+            - step est porté par le suffixe configuré (ex. 'staged_{NOW_DATETIME}').
+            - file_name_substitute est toujours une liste de remplacements appliqués en chaîne.
+            """
             stem = input_path.stem
+
+            # Appliquer les substitutions de nom de fichier (liste d'objets {src,target})
             sub_cfg = output_cfg.get("file_name_substitute")
             if isinstance(sub_cfg, dict):
-                src = sub_cfg.get("src") or ""
-                target = sub_cfg.get("target") or ""
+                # Tolérance minimale à l'ancien format : on traite un dict comme une liste de 1 élément
+                substitutions = [sub_cfg]
+            elif isinstance(sub_cfg, list):
+                substitutions = sub_cfg
+            else:
+                substitutions = []
+
+            for sub in substitutions:
+                if not isinstance(sub, dict):
+                    continue
+                src = (sub.get("src") or "")
+                target = (sub.get("target") or "")
                 if src:
                     stem = stem.replace(src, target)
+
+            # Extraire experience, device_id, date_day si possible
+            parts = stem.split("_")
+            if len(parts) >= 3:
+                experience, device_id, date_day = parts[0], parts[1], parts[2]
+                base_stem = f"{experience}_{device_id}_{date_day}"
+            else:
+                base_stem = stem
+
             p = (prefix + "_") if prefix else ""
             s = ("_" + suffix_with_now) if suffix_with_now else ""
-            return f"{p}{stem}{s}.parquet"
+            return f"{p}{base_stem}{s}.parquet"
 
         partition_by = output_cfg.get("partition_by") or []
         compression = output_cfg.get("compression")

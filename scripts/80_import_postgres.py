@@ -21,6 +21,7 @@ from fnmatch import fnmatch
 import polars as pl
 
 from format_ts import format_timestamp_column_utc_z
+from device_id_helper import get_device_id_from_stem
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -62,17 +63,6 @@ def get_domain_from_path(path: Path) -> Optional[str]:
     for parent in path.parents:
         if parent.name.startswith("domain="):
             return parent.name.split("=", 1)[1]
-    return None
-
-
-def get_device_id_from_stem(stem: str) -> Optional[str]:
-    """
-    Extrait le device_id (node) du nom de fichier (ex: premanip-grace_pil-85_2026-01-28_agg10s_... -> pil-85).
-    Pattern: {EXPERIENCE}_{NODE}_{DATA_DAY}_{SUFFIX}_{FILE_TS}.
-    """
-    parts = stem.split("_")
-    if len(parts) >= 2:
-        return parts[1]
     return None
 
 
@@ -305,9 +295,13 @@ def delete_replace_range(conn: Any, table_name: str, ts_column: str, min_ts: str
     return deleted or 0
 
 
+BATCH_INSERT_SIZE = 10_000
+
+
 def insert_rows(conn: Any, table_name: str, df: pl.DataFrame, schema: Optional[Dict[str, str]] = None) -> int:
     """Insère les lignes du DataFrame (colonnes internes ts, device_id, domain, sensor, value) dans la table cible.
     Le mapping vers les noms de colonnes SQL est configurable via schema.
+    Insertion par lots pour éviter blocage apparent et limiter la charge mémoire.
     """
     if df.height == 0:
         return 0
@@ -321,21 +315,31 @@ def insert_rows(conn: Any, table_name: str, df: pl.DataFrame, schema: Optional[D
     value_col = schema.get("value_column", "value")
 
     rows = df.to_dicts()
+    insert_sql = (
+        f"INSERT INTO {safe_table} ({ts_col}, {device_id_col}, {domain_col}, {sensor_col}, {value_col}) "
+        f"VALUES (%s, %s, %s, %s, %s)"
+    )
+
     with conn.cursor() as cur:
-        cur.executemany(
-            f"INSERT INTO {safe_table} ({ts_col}, {device_id_col}, {domain_col}, {sensor_col}, {value_col}) "
-            f"VALUES (%s, %s, %s, %s, %s)",
-            [
-                (
-                    r.get("ts"),
-                    str(r.get("device_id", "")),
-                    str(r.get("domain", "")),
-                    str(r.get("sensor", "")),
-                    r.get("value"),
-                )
-                for r in rows
-            ],
-        )
+        total = 0
+        for i in range(0, len(rows), BATCH_INSERT_SIZE):
+            batch = rows[i : i + BATCH_INSERT_SIZE]
+            cur.executemany(
+                insert_sql,
+                [
+                    (
+                        r.get("ts"),
+                        str(r.get("device_id", "")),
+                        str(r.get("domain", "")),
+                        str(r.get("sensor", "")),
+                        r.get("value"),
+                    )
+                    for r in batch
+                ],
+            )
+            total += len(batch)
+            if total % (10 * BATCH_INSERT_SIZE) == 0 and total > 0:
+                logger.info(f"  Insertion: {total}/{len(rows)} lignes...")
     conn.commit()
     return len(rows)
 
@@ -387,12 +391,38 @@ def process_single_file(
     id_vars = [ts_col, "device_id", "domain"]
     value_vars = [c for c in df.columns if c not in id_vars]
 
+    # Filtrage optionnel des métriques à importer depuis la config 80
+    # (output.database.include_metrics = ["m0", "m1", ...]).
+    db_cfg = config.get("output", {}).get("database", {})
+    include_metrics = db_cfg.get("include_metrics")
+    if isinstance(include_metrics, list) and include_metrics:
+        include_set = {str(m) for m in include_metrics}
+        value_vars = [c for c in value_vars if c in include_set]
+
     # #region agent log
     try:
         import json
         DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as _f:
-            _f.write(json.dumps({"hypothesisId": "H3-H5", "location": "80_import_postgres.py:process_single_file", "message": "id_vars_value_vars", "data": {"path": str(input_path), "columns": list(df.columns), "id_vars": id_vars, "value_vars": value_vars}, "timestamp": int(datetime.utcnow().timestamp() * 1000), "sessionId": "debug-session"}) + "\n")
+            _f.write(
+                json.dumps(
+                    {
+                        "hypothesisId": "H3-H5",
+                        "location": "80_import_postgres.py:process_single_file",
+                        "message": "id_vars_value_vars",
+                        "data": {
+                            "path": str(input_path),
+                            "columns": list(df.columns),
+                            "id_vars": id_vars,
+                            "value_vars": value_vars,
+                            "include_metrics": include_metrics,
+                        },
+                        "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                        "sessionId": "debug-session",
+                    }
+                )
+                + "\n"
+            )
     except Exception:
         pass
     # #endregion
@@ -527,10 +557,8 @@ def run(config: Dict) -> Dict:
         }
 
     params = db_cfg.get("parameters", {})
-    password_env = db_cfg.get("password_env", "POSTGRES_PASSWORD")
-    password = os.environ.get(password_env) or os.environ.get("PGPASSWORD")
-    if not password and params.get("password"):
-        password = params["password"]
+    # Mot de passe uniquement depuis la configuration JSON (parameters.password)
+    password = params.get("password")
     conn_params = {
         "host": params.get("host", "localhost"),
         "port": int(params.get("port", 5432)),
@@ -539,7 +567,7 @@ def run(config: Dict) -> Dict:
         "password": password,
     }
     if not conn_params["password"]:
-        logger.warning("Mot de passe Postgres non fourni (variable d'environnement POSTGRES_PASSWORD ou PGPASSWORD)")
+        logger.warning("Mot de passe Postgres non fourni dans output.database.parameters.password")
 
     column_to_sensor = config.get("output", {}).get("database", {}).get("column_to_sensor")
     if not isinstance(column_to_sensor, dict):
@@ -548,7 +576,8 @@ def run(config: Dict) -> Dict:
     # Lire tous les fichiers et concaténer en long
     first_file = filtered_files[0]
     domain = get_domain_from_path(first_file)
-    aggregation = get_aggregation_from_stem(first_file.stem)
+    # Agrégation : config output.database.aggregation prioritaire, sinon déduite du nom du premier fichier
+    aggregation = (db_cfg.get("aggregation") or "").strip() or get_aggregation_from_stem(first_file.stem)
     table_name = get_table_name(config, domain, aggregation, first_file)
     logger.info(f"Table cible: {table_name} (domain={domain}, aggregation={aggregation})")
 
@@ -682,6 +711,8 @@ def run(config: Dict) -> Dict:
             conn.commit()
             logger.info(f"Policy replace_all: table {table_name} vidée")
 
+        n_rows = combined.height
+        logger.info(f"Insertion en cours: {n_rows} lignes (par lots de 10000)...")
         inserted = insert_rows(conn, table_name, combined, schema=schema_cfg)
         logger.info(f"Insertion: {inserted} lignes dans {table_name}")
     finally:

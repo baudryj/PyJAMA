@@ -107,21 +107,58 @@ def _precision_for_column(decimal_places: Optional[Any], col_name: str) -> Optio
 
 
 def _normalize_metrics_aggregation(metrics_aggregation: Any) -> List[Tuple[str, str, str]]:
-    """Convertit metrics_aggregation (dict ou liste) en liste de (metric, method, output)."""
+    """Convertit metrics_aggregation (dict ou liste) en liste de (metric, method, output).
+
+    - metric : nom de la metric (ex. m6)
+    - method : 'median' ou 'average'
+    - output : nom de la colonne en sortie (par défaut == metric pour éviter les renommages).
+    """
     result: List[Tuple[str, str, str]] = []
     if isinstance(metrics_aggregation, dict):
         for metric, specs in metrics_aggregation.items():
             for spec in specs:
                 method = spec.get("method", "average")
-                output = spec.get("output", f"{metric}_{method}")
+                # Par défaut on garde le même nom de colonne que la metric
+                output = spec.get("output", metric)
                 result.append((metric, method, output))
     elif isinstance(metrics_aggregation, list):
         for item in metrics_aggregation:
             metric = item.get("metric", "")
             method = item.get("method", "average")
-            output = item.get("output", f"{metric}_{method}")
+            output = item.get("output", metric)
             result.append((metric, method, output))
     return result
+
+
+def _build_metrics_aggregation_from_domain(
+    df: pl.DataFrame,
+    domain: str,
+    aggregation_by_domain: Dict[str, Dict[str, Any]],
+) -> Optional[List[Tuple[str, str, str]]]:
+    """
+    Construit dynamiquement une liste (metric, method, output) à partir de aggregation_by_domain
+    en gardant les noms de colonnes identiques aux metrics.
+
+    aggregation_by_domain attendu :
+    {
+      "bio_signal": { "method": "median" },
+      "environment": { "method": "average" }
+    }
+    """
+    domain_cfg = aggregation_by_domain.get(domain)
+    if not domain_cfg:
+        return None
+
+    method = domain_cfg.get("method", "average")
+
+    if "metric" not in df.columns:
+        return None
+
+    present_metrics = sorted(set(df["metric"].unique().to_list()))
+    specs: List[Tuple[str, str, str]] = []
+    for metric in present_metrics:
+        specs.append((metric, method, metric))
+    return specs
 
 
 def _aggregate_single_file(input_path: Path, config: Dict) -> Tuple[Optional[pl.DataFrame], int]:
@@ -151,8 +188,21 @@ def _aggregate_single_file(input_path: Path, config: Dict) -> Tuple[Optional[pl.
 
     aggregation_level = config.get("aggregation_level", "1h")
     metrics_aggregation = config.get("metrics_aggregation", {})
-    if not metrics_aggregation:
-        logger.warning("metrics_aggregation vide, fichier ignoré")
+    aggregation_by_domain = config.get("aggregation_by_domain") or {}
+
+    specs: List[Tuple[str, str, str]] = []
+    if metrics_aggregation:
+        # Mode explicite : on suit strictement metrics_aggregation
+        specs = _normalize_metrics_aggregation(metrics_aggregation)
+    elif aggregation_by_domain:
+        # Mode simplifié par domaine : même méthode pour toutes les metrics du domaine,
+        # en conservant les noms de colonnes identiques aux metrics.
+        specs_domain = _build_metrics_aggregation_from_domain(df, get_domain_from_path(input_path) or "", aggregation_by_domain)
+        if specs_domain:
+            specs = specs_domain
+
+    if not specs:
+        logger.warning("Aucune règle d'agrégation trouvée (metrics_aggregation et aggregation_by_domain vides ou non applicables), fichier ignoré")
         return None, rows_before
 
     # ts -> datetime puis ts_bucket (début de fenêtre)
@@ -165,7 +215,6 @@ def _aggregate_single_file(input_path: Path, config: Dict) -> Tuple[Optional[pl.
     df = df.with_columns(pl.col("ts_dt").dt.truncate(aggregation_level).alias("ts_bucket"))
 
     present_metrics = set(df["metric"].unique().to_list())
-    specs = _normalize_metrics_aggregation(metrics_aggregation)
 
     # #region agent log
     _debug_log = Path(__file__).resolve().parent.parent / "logs" / "debug.log"
@@ -367,7 +416,47 @@ def run(config: Dict) -> Dict:
         "total_rows_after": 0,
     }
 
+    aggregation_by_domain = config.get("aggregation_by_domain") or {}
+
     for file_path in filtered_files:
+        # Si on est en mode aggregation_by_domain, on peut avoir des fichiers
+        # appartenant à des domaines non configurés (ex. environment) : on les
+        # ignore silencieusement (info) sans les compter en échec.
+        domain = get_domain_from_path(file_path)
+        if aggregation_by_domain and (not domain or domain not in aggregation_by_domain):
+            logger.info(
+                f"Fichier {file_path} ignoré : domaine '{domain}' sans règle d'agrégation dans aggregation_by_domain"
+            )
+            # #region agent log
+            try:
+                import json
+                from pathlib import Path as _Path
+                _dbg_path = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+                _dbg_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(_dbg_path, "a", encoding="utf-8") as _f:
+                    _f.write(
+                        json.dumps(
+                            {
+                                "sessionId": "debug-session",
+                                "runId": "pre-fix",
+                                "hypothesisId": "H-agg-domain-skip",
+                                "location": "70_aggregated.py:run",
+                                "message": "skip_file_without_domain_rule",
+                                "data": {
+                                    "path": str(file_path),
+                                    "domain": domain,
+                                    "configured_domains": sorted(aggregation_by_domain.keys()),
+                                },
+                                "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                            }
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
+            # #endregion
+            continue
+
         output_path, report = process_single_file(file_path, config)
         if report.get("error"):
             summary["failed_files"].append(report)

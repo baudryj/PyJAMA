@@ -20,6 +20,7 @@ import polars as pl
 
 from format_ts import format_timestamp_column_utc_z
 from output_columns_helper import apply_output_columns
+from device_id_helper import get_device_id_from_stem
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -352,7 +353,12 @@ def process_single_file(input_path: Path, config: Dict) -> Tuple[Optional[Path],
         if "metric" not in df.columns or "value" not in df.columns:
             raise ValueError(f"Colonnes metric/value absentes dans {input_path.name}")
 
-        device_id = df["device_id"][0] if "device_id" in df.columns and df.height > 0 else config.get("device_id", "")
+        # device_id : priorité aux données canonical, sinon inférence depuis le nom de fichier, sinon config
+        if "device_id" in df.columns and df.height > 0:
+            device_id = df["device_id"][0]
+        else:
+            inferred_device_id = get_device_id_from_stem(input_path.stem)
+            device_id = inferred_device_id or config.get("device_id", "")
 
         resampled = resample_domain(
             df,
