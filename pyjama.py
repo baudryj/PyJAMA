@@ -320,6 +320,7 @@ def run_script(
     config_path: str,
     cli_from: Optional[str] = None,
     cli_to: Optional[str] = None,
+    cli_mode: Optional[str] = None,
 ) -> int:
     """
     Exécute un script de traitement unique à partir d'un fichier de configuration.
@@ -355,6 +356,15 @@ def run_script(
                 input_cfg["from"] = dynamic_vars.get("FROM", cli_from)
             if cli_to:
                 input_cfg["to"] = dynamic_vars.get("TO", cli_to)
+
+        # 3ter. --mode auto : forcer auto_mode à "max_ts" pour l'import raw (81)
+        if cli_mode is not None and str(cli_mode).strip().lower() == "auto":
+            if "output" not in config:
+                config["output"] = {}
+            if "database" not in config["output"]:
+                config["output"]["database"] = {}
+            config["output"]["database"]["auto_mode"] = "max_ts"
+            logger.info("Mode CLI: auto -> auto_mode=max_ts")
 
         # 4. Script requis (passé en paramètre par drawer ou CLI)
         if not script_name:
@@ -445,11 +455,18 @@ def main():
         required=True,
         help='Chemin vers le fichier JSON de configuration'
     )
+    run_parser.add_argument(
+        '--mode',
+        dest='mode',
+        type=str,
+        default=None,
+        help="Mode d'exécution (ex: 'auto' pour 81 = max_ts)"
+    )
 
     args = parser.parse_args()
 
     if args.command == 'run':
-        exit_code = run_script(args.script, args.config)
+        exit_code = run_script(args.script, args.config, cli_mode=args.mode)
         sys.exit(exit_code)
 
     parser.print_help()

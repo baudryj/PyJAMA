@@ -63,7 +63,12 @@ def load_pipeline(path: Path) -> Dict[str, Any]:
     return pipeline
 
 
-def execute_pipeline(pipeline_path: str, cli_from: str | None = None, cli_to: str | None = None) -> int:
+def execute_pipeline(
+    pipeline_path: str,
+    cli_from: str | None = None,
+    cli_to: str | None = None,
+    cli_mode: str | None = None,
+) -> int:
     """
     Exécute séquentiellement les étapes décrites dans un pipeline JSON.
 
@@ -99,7 +104,10 @@ def execute_pipeline(pipeline_path: str, cli_from: str | None = None, cli_to: st
             f"script='{script}', config='{config_path}'"
         )
 
-        exit_code = pyjama.run_script(script, str(config_path), cli_from=cli_from, cli_to=cli_to)
+        exit_code = pyjama.run_script(
+            script, str(config_path),
+            cli_from=cli_from, cli_to=cli_to, cli_mode=cli_mode,
+        )
         if exit_code != 0:
             logger.error(
                 f"[{drawer_name}] Échec à l'étape {idx} avec le script '{script}' "
@@ -140,11 +148,23 @@ def main() -> None:
         type=str,
         help="Borne temporelle de fin (format UTC Z, ex. 2026-02-04T11:00:00Z, peut contenir {NOW})",
     )
+    run_parser.add_argument(
+        "--mode",
+        dest="mode",
+        type=str,
+        default=None,
+        help="Mode (ex: 'auto' pour forcer auto_mode=max_ts sur les étapes 81)",
+    )
 
     args = parser.parse_args()
 
     if args.command == "run":
-        code = execute_pipeline(args.pipeline, cli_from=args.time_from, cli_to=args.time_to)
+        code = execute_pipeline(
+            args.pipeline,
+            cli_from=args.time_from,
+            cli_to=args.time_to,
+            cli_mode=args.mode,
+        )
         sys.exit(code)
 
     parser.print_help()

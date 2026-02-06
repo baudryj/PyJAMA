@@ -699,7 +699,8 @@ def run(config: Dict) -> Dict:
 
     aggregation = (db_cfg.get("aggregation") or "raw").lower()
     agg_method = (db_cfg.get("aggregation_method") or "average").lower()
-    auto_mode = bool(db_cfg.get("auto_mode", False))
+    auto_mode_raw = db_cfg.get("auto_mode", False)
+    auto_mode = str(auto_mode_raw).lower() if isinstance(auto_mode_raw, str) else auto_mode_raw
     destroy = bool(db_cfg.get("destroy", False))
     policy = db_cfg.get("policy", "replace")
 
@@ -729,10 +730,28 @@ def run(config: Dict) -> Dict:
         ensure_table_raw(conn, table_name, schema=schema_cfg)
         logger.info(f"Création/évolution de la table {table_name} OK")
 
-        # Mode auto : ne charger que les jours manquants
-        file_days = _infer_days_from_files(filtered_files, timestamp_column=ts_col)
-        if auto_mode:
-            ts_db_col = schema_cfg.get("timestamp_column", "Time")
+        # Mode auto : deux options
+        # - "max_ts" : ne charger que ce qui est > MAX(Time) en base
+        # - True (bool) : compléter uniquement les jours manquants
+        ts_db_col = schema_cfg.get("timestamp_column", "Time")
+        max_time = None
+        if auto_mode == "max_ts":
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT MAX({ts_db_col}) FROM {safe_table}")
+                max_time = cur.fetchone()[0]
+            logger.info(f"Mode auto=max_ts: MAX({ts_db_col}) en base = {max_time}")
+
+            if max_time is not None:
+                filtered = []
+                for f in filtered_files:
+                    _, last_ts = get_file_timestamp_range_raw(f, timestamp_column=ts_col)
+                    if last_ts is None or last_ts > max_time:
+                        filtered.append(f)
+                logger.info(f"Mode auto=max_ts: {len(filtered)}/{len(filtered_files)} fichiers retenus")
+                filtered_files = filtered
+
+        elif auto_mode:
+            file_days = _infer_days_from_files(filtered_files, timestamp_column=ts_col)
             filtered_files = _auto_mode_filter_files_by_missing_days(
                 conn, table_name, ts_db_col, filtered_files, file_days
             )
@@ -810,6 +829,10 @@ def run(config: Dict) -> Dict:
                     device_id_col="device_id",
                     exclude_columns=exclude_columns,
                 )
+
+                # Filtrer en mode auto=max_ts après parsing (best effort)
+                if auto_mode == "max_ts" and max_time is not None:
+                    long_df = long_df.filter(pl.col("Time") > max_time)
 
                 if include_sensors and isinstance(include_sensors, list):
                     include_set = {str(s) for s in include_sensors}
