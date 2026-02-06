@@ -122,6 +122,48 @@ def get_file_timestamp_range_raw(
         return None, None
 
 
+def _parse_semicolon_kv_file(path: Path) -> pl.DataFrame:
+    """
+    Parse un fichier raw au format:
+    timestamp;capteur:valeur;capteur:valeur;...
+    Best-effort: ignore les lignes invalides.
+    """
+    rows: List[Dict[str, Any]] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(";")
+                if len(parts) < 2:
+                    continue
+                ts = parts[0].strip()
+                if not ts:
+                    continue
+                row: Dict[str, Any] = {"Time": ts}
+                ok = False
+                for item in parts[1:]:
+                    if ":" not in item:
+                        continue
+                    k, v = item.split(":", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if not k:
+                        continue
+                    try:
+                        row[k] = float(v)
+                    except Exception:
+                        # best-effort: ignore valeur invalide
+                        continue
+                    ok = True
+                if ok:
+                    rows.append(row)
+    except Exception:
+        return pl.DataFrame()
+    return pl.DataFrame(rows) if rows else pl.DataFrame()
+
+
 def _raw_wide_to_long(
     df: pl.DataFrame,
     time_col: str,
@@ -141,10 +183,13 @@ def _raw_wide_to_long(
     value_vars = [c for c in df.columns if c not in exclude]
 
     if not value_vars:
+        # Aucun capteur exploitable dans ce fichier : on retourne un DataFrame vide
+        # avec le schéma attendu (Time, device_id, sensor, value) pour que la suite
+        # du pipeline puisse continuer sans erreur.
         return pl.DataFrame(
             {
-                time_col: df[time_col] if time_col in df.columns else [],
-                device_id_col: df[device_id_col] if device_id_col in df.columns else [],
+                "Time": [],
+                "device_id": [],
                 "sensor": [],
                 "value": [],
             }
@@ -232,6 +277,10 @@ def insert_rows(
     table_name: str,
     df: pl.DataFrame,
     schema: Optional[Dict[str, str]] = None,
+    commit_each_batch: bool = False,
+    log_each_batch: bool = False,
+    insert_method: str = "executemany",
+    page_size: Optional[int] = None,
 ) -> int:
     """
     Insère les lignes du DataFrame (Time, device_id, sensor, value) dans la table cible.
@@ -254,27 +303,134 @@ def insert_rows(
         f"INSERT INTO {safe_table} ({ts_col}, {device_id_col}, {sensor_col}, {value_col}) "
         f"VALUES (%s, %s, %s, %s)"
     )
+    insert_sql_values = (
+        f"INSERT INTO {safe_table} ({ts_col}, {device_id_col}, {sensor_col}, {value_col}) "
+        f"VALUES %s"
+    )
+    method = (insert_method or "executemany").lower()
+    batch_size = page_size or BATCH_INSERT_SIZE
+
+    # #region agent log
+    try:
+        import json
+        from pathlib import Path as _Path
+        _dbg = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+        with open(_dbg, "a", encoding="utf-8") as _f:
+            _f.write(
+                json.dumps(
+                    {
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "H_OPT_1",
+                        "location": "81_import_raw_postgres.py:insert_rows:start",
+                        "message": "insert_start",
+                        "data": {
+                            "rows": len(rows),
+                            "method": method,
+                            "batch_size": batch_size,
+                        },
+                        "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
+
+    if method not in ("executemany", "execute_values"):
+        method = "executemany"
 
     with conn.cursor() as cur:
         total = 0
-        for i in range(0, len(rows), BATCH_INSERT_SIZE):
-            batch = rows[i : i + BATCH_INSERT_SIZE]
-            cur.executemany(
-                insert_sql,
-                [
-                    (
-                        r.get("Time"),
-                        str(r.get("device_id", "")),
-                        str(r.get("sensor", "")),
-                        r.get("value"),
-                    )
-                    for r in batch
-                ],
-            )
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i : i + batch_size]
+            batch_tuples = [
+                (
+                    r.get("Time"),
+                    str(r.get("device_id", "")),
+                    str(r.get("sensor", "")),
+                    r.get("value"),
+                )
+                for r in batch
+            ]
+
+            import time as _time
+            t0 = _time.monotonic()
+            if method == "execute_values":
+                from psycopg2.extras import execute_values
+                execute_values(cur, insert_sql_values, batch_tuples, page_size=len(batch_tuples))
+            else:
+                cur.executemany(insert_sql, batch_tuples)
+            t1 = _time.monotonic()
+
             total += len(batch)
-            if total % (10 * BATCH_INSERT_SIZE) == 0 and total > 0:
+            if log_each_batch:
+                logger.info(f"  Batch insert: {total}/{len(rows)} lignes ({t1 - t0:.2f}s)")
+            elif total % (10 * BATCH_INSERT_SIZE) == 0 and total > 0:
                 logger.info(f"  Insertion: {total}/{len(rows)} lignes...")
+            if commit_each_batch:
+                conn.commit()
+                if log_each_batch:
+                    logger.info("  Batch commit OK")
+
+            # #region agent log
+            try:
+                import json
+                from pathlib import Path as _Path
+                _dbg = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+                with open(_dbg, "a", encoding="utf-8") as _f:
+                    _f.write(
+                        json.dumps(
+                            {
+                                "sessionId": "debug-session",
+                                "runId": "run1",
+                                "hypothesisId": "H_OPT_2",
+                                "location": "81_import_raw_postgres.py:insert_rows:batch",
+                                "message": "batch_done",
+                                "data": {
+                                    "batch_rows": len(batch),
+                                    "total": total,
+                                    "elapsed_s": round(t1 - t0, 4),
+                                    "method": method,
+                                },
+                                "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                            }
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
+            # #endregion
     conn.commit()
+
+    # #region agent log
+    try:
+        import json
+        from pathlib import Path as _Path
+        _dbg = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+        with open(_dbg, "a", encoding="utf-8") as _f:
+            _f.write(
+                json.dumps(
+                    {
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "H_OPT_3",
+                        "location": "81_import_raw_postgres.py:insert_rows:end",
+                        "message": "insert_done",
+                        "data": {
+                            "rows": len(rows),
+                            "method": method,
+                            "batch_size": batch_size,
+                        },
+                        "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
     return len(rows)
 
 
@@ -361,7 +517,11 @@ def _apply_time_filters_to_files(
     to_date: str,
     timestamp_column: str,
 ) -> List[Path]:
-    """Filtre les fichiers selon une plage from/to en lisant min/max sur la colonne temps."""
+    """Filtre les fichiers selon une plage from/to.
+
+    Priorité : date dans le nom de fichier (YYYY-MM-DD) si disponible,
+    sinon fallback sur min/max de la colonne temps.
+    """
 
     def parse_date(date_str: str, is_end: bool = False) -> Optional[datetime]:
         if not date_str or date_str == "yyyy-mm-ddTh:m:sZ":
@@ -383,6 +543,21 @@ def _apply_time_filters_to_files(
 
     filtered: List[Path] = []
     for f in files:
+        # 1) Filtrage par date dans le nom de fichier si possible
+        file_day = get_day_from_stem(f.stem)
+        if file_day is not None and (from_dt or to_dt):
+            include = True
+            if from_dt and file_day < from_dt.date():
+                include = False
+            if to_dt and file_day > to_dt.date():
+                include = False
+            if include:
+                filtered.append(f)
+            else:
+                logger.info(f"Fichier {f.name} exclu (hors plage temporelle via nom)")
+            continue
+
+        # 2) Fallback : lecture min/max sur la colonne temps
         first_ts, last_ts = get_file_timestamp_range_raw(f, timestamp_column=timestamp_column)
         if first_ts is None or last_ts is None:
             logger.warning(f"Plage temporelle illisible pour {f}, fichier inclus")
@@ -501,6 +676,7 @@ def run(config: Dict) -> Dict:
             "total_rows_before": 0,
             "total_rows_after": 0,
         }
+    logger.info("Connexion à la base OK")
 
     processed_reports: List[Dict[str, Any]] = []
     failed_reports: List[Dict[str, Any]] = []
@@ -528,14 +704,30 @@ def run(config: Dict) -> Dict:
     policy = db_cfg.get("policy", "replace")
 
     try:
-        # Gestion destroy/autocreate et schéma/colonnes
+        # Étape 1 : liste des tables (validation)
         with conn.cursor() as cur:
-            safe_table = f'"{table_name}"' if not table_name.islower() else table_name
-            if destroy:
+            cur.execute(
+                """
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+                """
+            )
+            tables = [r[0] for r in cur.fetchall()]
+        logger.info(f"Liste des tables (schéma courant): {len(tables)} table(s) — {tables[:10]}{'...' if len(tables) > 10 else ''}")
+
+        # Étape 2 : suppression de la table si destroy=True
+        safe_table = f'"{table_name}"' if not table_name.islower() else table_name
+        if destroy:
+            logger.info(f"Suppression de la table {table_name} (destroy=True)...")
+            with conn.cursor() as cur:
                 cur.execute(f"DROP TABLE IF EXISTS {safe_table}")
                 conn.commit()
-                logger.info(f"Option destroy=True : table {table_name} supprimée avant recréation")
+            logger.info("Table supprimée OK")
+
+        # Étape 3 : création / évolution de la table
         ensure_table_raw(conn, table_name, schema=schema_cfg)
+        logger.info(f"Création/évolution de la table {table_name} OK")
 
         # Mode auto : ne charger que les jours manquants
         file_days = _infer_days_from_files(filtered_files, timestamp_column=ts_col)
@@ -572,10 +764,40 @@ def run(config: Dict) -> Dict:
                     df = pl.read_csv(f, null_values="NaN")
                 report["rows_before"] = df.height
 
-                # Normaliser la colonne temps
-                if ts_col not in df.columns:
-                    raise ValueError(f"Colonne timestamp absente dans {f.name}: {ts_col}")
-                df = format_timestamp_column_utc_z(df, ts_col)
+                # Normaliser la colonne temps (approche tolérante : casse et fallback première colonne)
+                ts_for_df = ts_col
+                if ts_for_df not in df.columns:
+                    # 1) tentative insensible à la casse / espaces
+                    lowered = {c.strip().lower(): c for c in df.columns}
+                    key = ts_for_df.strip().lower()
+                    if key in lowered:
+                        real_col = lowered[key]
+                        logger.info(
+                            f"Colonne timestamp '{ts_for_df}' non trouvée telle quelle dans {f.name}, "
+                            f"utilisation de la colonne existante '{real_col}'."
+                        )
+                        ts_for_df = real_col
+                    else:
+                        # 2) fallback simple : première colonne
+                        if not df.columns:
+                            raise ValueError(f"Aucune colonne lisible dans {f.name}")
+                        ts_for_df = df.columns[0]
+                        logger.warning(
+                            f"Colonne timestamp '{ts_col}' absente dans {f.name}, "
+                            f"fallback sur la première colonne '{ts_for_df}'."
+                        )
+
+                # Si CSV au format "timestamp;capteur:valeur;...", reparser en mode best-effort
+                if f.suffix.lower() != ".parquet":
+                    if df.shape[1] == 1:
+                        sample = str(df.select(df.columns[0]).head(1).to_series()[0]) if df.height > 0 else ""
+                        if ";" in sample and ":" in sample:
+                            logger.info(f"Détection format raw ';capteur:valeur' pour {f.name}, parsing best-effort")
+                            df = _parse_semicolon_kv_file(f)
+                            report["rows_before"] = df.height
+                            ts_for_df = "Time"
+
+                df = format_timestamp_column_utc_z(df, ts_for_df)
 
                 # Inférer device_id si absent
                 if "device_id" not in df.columns:
@@ -584,7 +806,7 @@ def run(config: Dict) -> Dict:
 
                 long_df = _raw_wide_to_long(
                     df,
-                    time_col=ts_col,
+                    time_col=ts_for_df,
                     device_id_col="device_id",
                     exclude_columns=exclude_columns,
                 )
@@ -592,6 +814,68 @@ def run(config: Dict) -> Dict:
                 if include_sensors and isinstance(include_sensors, list):
                     include_set = {str(s) for s in include_sensors}
                     long_df = long_df.filter(pl.col("sensor").is_in(include_set))
+
+                # Si aucune donnée exploitable, on passe au fichier suivant
+                if long_df.height == 0:
+                    report["rows_after"] = 0
+                    processed_reports.append(report)
+                    # #region agent log
+                    try:
+                        import json
+                        from pathlib import Path as _Path
+                        _dbg = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+                        with open(_dbg, "a", encoding="utf-8") as _f:
+                            _f.write(
+                                json.dumps(
+                                    {
+                                        "sessionId": "debug-session",
+                                        "runId": "run1",
+                                        "hypothesisId": "H6",
+                                        "location": "81_import_raw_postgres.py:run:skip_empty",
+                                        "message": "skip_empty_long_df",
+                                        "data": {
+                                            "file": f.name,
+                                            "columns": list(long_df.columns),
+                                            "rows": long_df.height,
+                                        },
+                                        "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                                    }
+                                )
+                                + "\n"
+                            )
+                    except Exception:
+                        pass
+                    # #endregion
+                    continue
+
+                # #region agent log
+                try:
+                    import json
+                    from pathlib import Path as _Path
+                    _dbg = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+                    with open(_dbg, "a", encoding="utf-8") as _f:
+                        _f.write(
+                            json.dumps(
+                                {
+                                    "sessionId": "debug-session",
+                                    "runId": "run1",
+                                    "hypothesisId": "H1",
+                                    "location": "81_import_raw_postgres.py:run:before_agg",
+                                    "message": "long_df_schema_before_agg",
+                                    "data": {
+                                        "file": f.name,
+                                        "columns": list(long_df.columns),
+                                        "dtypes": {c: str(long_df.schema.get(c)) for c in long_df.columns},
+                                        "rows": long_df.height,
+                                    },
+                                    "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                                }
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    pass
+                # #endregion
 
                 # Agrégation éventuelle 10s/60s
                 if aggregation in ("10s", "60s"):
@@ -618,8 +902,125 @@ def run(config: Dict) -> Dict:
                         .rename({"Time_bucket": "Time"})
                     )
 
-                # Arrondir à 2 décimales
-                long_df = long_df.with_columns(pl.col("value").round(2).alias("value"))
+                # #region agent log
+                try:
+                    import json
+                    from pathlib import Path as _Path
+                    _dbg = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+                    with open(_dbg, "a", encoding="utf-8") as _f:
+                        _f.write(
+                            json.dumps(
+                                {
+                                    "sessionId": "debug-session",
+                                    "runId": "run1",
+                                    "hypothesisId": "H2",
+                                    "location": "81_import_raw_postgres.py:run:before_round",
+                                    "message": "value_dtype_before_round",
+                                    "data": {
+                                        "file": f.name,
+                                        "has_value_col": "value" in long_df.columns,
+                                        "value_dtype": str(long_df.schema.get("value")),
+                                        "rows": long_df.height,
+                                    },
+                                    "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                                }
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    pass
+                # #endregion
+
+                # Arrondir à 2 décimales (skip si dtype Null)
+                value_dtype = long_df.schema.get("value")
+                if long_df.height > 0 and "value" in long_df.columns and value_dtype != pl.Null:
+                    long_df = long_df.with_columns(
+                        pl.col("value").cast(pl.Float64).round(2).alias("value")
+                    )
+                    # #region agent log
+                    try:
+                        import json
+                        from pathlib import Path as _Path
+                        _dbg = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+                        with open(_dbg, "a", encoding="utf-8") as _f:
+                            _f.write(
+                                json.dumps(
+                                    {
+                                        "sessionId": "debug-session",
+                                        "runId": "run1",
+                                        "hypothesisId": "H4",
+                                        "location": "81_import_raw_postgres.py:run:round",
+                                        "message": "round_applied",
+                                        "data": {
+                                            "file": f.name,
+                                            "value_dtype": str(value_dtype),
+                                            "rows": long_df.height,
+                                        },
+                                        "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                                    }
+                                )
+                                + "\n"
+                            )
+                    except Exception:
+                        pass
+                    # #endregion
+                else:
+                    # #region agent log
+                    try:
+                        import json
+                        from pathlib import Path as _Path
+                        _dbg = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+                        with open(_dbg, "a", encoding="utf-8") as _f:
+                            _f.write(
+                                json.dumps(
+                                    {
+                                        "sessionId": "debug-session",
+                                        "runId": "run1",
+                                        "hypothesisId": "H5",
+                                        "location": "81_import_raw_postgres.py:run:round",
+                                        "message": "round_skipped",
+                                        "data": {
+                                            "file": f.name,
+                                            "has_value_col": "value" in long_df.columns,
+                                            "value_dtype": str(value_dtype),
+                                            "rows": long_df.height,
+                                        },
+                                        "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                                    }
+                                )
+                                + "\n"
+                            )
+                    except Exception:
+                        pass
+                    # #endregion
+
+                # #region agent log
+                try:
+                    import json
+                    from pathlib import Path as _Path
+                    _dbg = _Path("/home/jbaudry/Documents/2026/PyJAMA/.cursor/debug.log")
+                    with open(_dbg, "a", encoding="utf-8") as _f:
+                        _f.write(
+                            json.dumps(
+                                {
+                                    "sessionId": "debug-session",
+                                    "runId": "run1",
+                                    "hypothesisId": "H3",
+                                    "location": "81_import_raw_postgres.py:run:after_round",
+                                    "message": "value_dtype_after_round",
+                                    "data": {
+                                        "file": f.name,
+                                        "value_dtype": str(long_df.schema.get("value")),
+                                        "rows": long_df.height,
+                                    },
+                                    "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                                }
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    pass
+                # #endregion
 
                 report["rows_after"] = long_df.height
                 frames.append(long_df)
@@ -643,11 +1044,17 @@ def run(config: Dict) -> Dict:
 
         combined = pl.concat(frames)
 
-        # Politique de remplacement : delete plage [from,to] ou TRUNCATE
+        # Mode test: limiter le nombre de lignes insérées
+        limit_rows = db_cfg.get("limit_rows")
+        if isinstance(limit_rows, int) and limit_rows > 0:
+            combined = combined.head(limit_rows)
+            logger.info(f"Mode test: limit_rows={limit_rows} -> {combined.height} lignes à insérer")
+
+        # Étape 4 : politique de remplacement (replace / replace_all)
         ts_db_col = schema_cfg.get("timestamp_column", "Time")
-        safe_table = f'"{table_name}"' if not table_name.islower() else table_name
         with conn.cursor() as cur:
             if policy == "replace":
+                logger.info("Policy replace: suppression des lignes dans la plage concernée...")
                 # Utilise from/to si fournis, sinon min/max de combined
                 if from_date or to_date:
                     # Même parser que plus haut
@@ -672,18 +1079,30 @@ def run(config: Dict) -> Dict:
                         (min_ts_str, max_ts_str),
                     )
                     deleted = cur.rowcount
-                    logger.info(
-                        f"Policy replace: {deleted} lignes supprimées dans [{min_ts_str}, {max_ts_str}]"
-                    )
+                    logger.info(f"Policy replace OK: {deleted} lignes supprimées")
             elif policy == "replace_all":
+                logger.info("Policy replace_all: TRUNCATE...")
                 cur.execute(f"TRUNCATE TABLE {safe_table}")
-                logger.info(f"Policy replace_all: table {table_name} vidée")
+                logger.info("Policy replace_all OK")
         conn.commit()
 
         n_rows = combined.height
         logger.info(f"Insertion en cours: {n_rows} lignes (par lots de {BATCH_INSERT_SIZE})...")
-        inserted = insert_rows(conn, table_name, combined, schema=schema_cfg)
-        logger.info(f"Insertion: {inserted} lignes dans {table_name}")
+        commit_each_batch = bool(db_cfg.get("commit_each_batch", False))
+        log_each_batch = bool(db_cfg.get("log_each_batch", False))
+        insert_method = db_cfg.get("insert_method", "executemany")
+        page_size = db_cfg.get("page_size")
+        inserted = insert_rows(
+            conn,
+            table_name,
+            combined,
+            schema=schema_cfg,
+            commit_each_batch=commit_each_batch,
+            log_each_batch=log_each_batch,
+            insert_method=insert_method,
+            page_size=page_size,
+        )
+        logger.info(f"Insertion OK: {inserted} lignes dans {table_name}")
 
     finally:
         conn.close()
