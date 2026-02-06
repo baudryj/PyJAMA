@@ -62,6 +62,42 @@ manager.sh             # create / archive / delete / install
 
 ---
 
+## Import vers PostgreSQL / Grafana
+
+- **Étape 80** — import des données agrégées (70_aggregated) en format long `(ts, device_id, domain, sensor, value)` :
+
+  ```bash
+  python3 pyjama.py run 80_import_postgres.py --with configs/MON_EXPO/80_postgres_bio_signal_10s.json
+  ```
+
+- **Étape 81** — import des données **brutes** (00_raw) en format long `(Time, device_id, sensor, value)` pour visualisation rapide :
+
+  - **Agg 60s sur un jour précis** :
+
+    ```bash
+    python3 pyjama.py run 81_import_raw_postgres.py \
+      --with configs/MON_EXPO/81_import_raw_postgres_60s.json \
+      --from 2026-02-05 --to 2026-02-05
+    ```
+
+  - **Agg 10s sur un jour précis** :
+
+    ```bash
+    python3 pyjama.py run 81_import_raw_postgres.py \
+      --with configs/MON_EXPO/81_import_raw_postgres_10s.json \
+      --from 2026-02-05 --to 2026-02-05
+    ```
+
+  - **Mode auto (batch quasi live)** — le script regarde ce qui manque en base et complète à partir de `00_raw` :
+
+    ```bash
+    python3 pyjama.py run 81_import_raw_postgres.py \
+      --with configs/MON_EXPO/81_import_raw_postgres_60s.json \
+      --mode auto
+    ```
+
+    Même chose en 10s avec la config `81_import_raw_postgres_10s.json`.
+
 ## Variables d’environnement
 
 - **`POSTGRES_PASSWORD`** — requis pour l’étape 80_import_postgres si vous exportez vers PostgreSQL.
@@ -72,6 +108,9 @@ manager.sh             # create / archive / delete / install
 
 - **Timestamps** : UTC avec suffixe `Z` (`YYYY-MM-DDTHH:MM:SSZ`).
 - **Sortie pipeline** : Parquet (compression snappy). CSV via l’utilitaire `scripts/parquet_to_csv.py` si besoin.
+- **Import Postgres (80/81)** : tables longues simples pour Grafana, colonnes clefs :
+  - 80 : `ts`, `device_id`, `domain`, `sensor`, `value`
+  - 81 : `Time`, `device_id`, `sensor`, `value`
 - **Qualité** : colonne `quality_flag` (0=OK, 1=Manquant, 2=Spike, …). Voir la doc interne (ex. `.cursor/rules/data-conventions.mdc`) pour le détail.
 
 ---
