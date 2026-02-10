@@ -315,6 +315,20 @@ def print_summary(summary: Dict):
     print("=" * 60 + "\n")
 
 
+def _write_state_log(log_path: Optional[str], entry: Dict) -> None:
+    """Écrit une ligne JSONL dans le fichier state log (si défini)."""
+    if not log_path:
+        return
+    try:
+        p = Path(log_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        entry["ts"] = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        logger.warning(f"Impossible d'écrire dans le state log {log_path}: {e}")
+
+
 def run_script(
     script_name: str,
     config_path: str,
@@ -332,16 +346,21 @@ def run_script(
     Returns:
         Code de retour (0 si succès, >0 en cas d'erreur ou de fichiers en échec).
     """
+    state_log_path = None
+    config_id = None
+
     try:
+        from config_v2 import detect_version, adapt_v2_to_v1
+
         # 1. Charger la configuration
         cfg_path = Path(config_path)
         if not cfg_path.is_absolute():
-            # Si chemin relatif, chercher depuis le répertoire du script
             script_dir = Path(__file__).parent
             cfg_path = script_dir / cfg_path
 
         config = load_config(cfg_path)
         base_path = Path(__file__).parent
+        config_id = config.get("id", "N/A")
 
         # 2. Calculer les variables dynamiques (NOW, NOW_DATETIME, FROM, TO)
         dynamic_vars = compute_dynamic_vars(config, cli_from=cli_from, cli_to=cli_to)
@@ -349,7 +368,15 @@ def run_script(
         # 3. Substituer les variables dans la configuration
         config = substitute_placeholders(config, dynamic_vars)
 
-        # 3bis. Surcharger explicitement les bornes temporelles input.from / input.to si fournies en CLI
+        # 4. Extraire state.log avant adaptation (clé v2)
+        state_log_path = (config.get("state") or {}).get("log")
+
+        # 5. Adapter v2 → v1 si nécessaire
+        if detect_version(config) == "v2":
+            logger.info(f"Config v2 détectée — adaptation vers v1")
+            config = adapt_v2_to_v1(config)
+
+        # 6. CLI overrides : --from / --to
         input_cfg = config.get("input")
         if isinstance(input_cfg, dict):
             if cli_from:
@@ -357,7 +384,7 @@ def run_script(
             if cli_to:
                 input_cfg["to"] = dynamic_vars.get("TO", cli_to)
 
-        # 3ter. --mode auto : forcer auto_mode à "max_ts" pour l'import raw (81)
+        # 7. --mode auto : forcer auto_mode à "max_ts"
         if cli_mode is not None and str(cli_mode).strip().lower() == "auto":
             if "output" not in config:
                 config["output"] = {}
@@ -366,67 +393,59 @@ def run_script(
             config["output"]["database"]["auto_mode"] = "max_ts"
             logger.info("Mode CLI: auto -> auto_mode=max_ts")
 
-        # 4. Script requis (passé en paramètre par drawer ou CLI)
+        # 8. Script requis
         if not script_name:
             raise ValueError("Le nom du script est requis (ex: 10_parser.py)")
 
-        # Vérification de l'environnement et de polars (log de debug)
-        _logpath = Path(__file__).parent / "logs" / "debug.log"
-        _polars_ok, _polars_err = False, None
-        try:
-            __import__("polars")
-            _polars_ok = True
-        except Exception as e:
-            _polars_err = str(e)
-        try:
-            _logpath.parent.mkdir(parents=True, exist_ok=True)
-            with open(_logpath, "a", encoding="utf-8") as _f:
-                _f.write(
-                    json.dumps(
-                        {
-                            "sessionId": "debug-session",
-                            "runId": "run1",
-                            "hypothesisId": "H1",
-                            "location": "pyjama.py:run_script",
-                            "message": "env and polars check",
-                            "data": {
-                                "executable": sys.executable,
-                                "polars_ok": _polars_ok,
-                                "polars_err": _polars_err,
-                            },
-                            "timestamp": int(__import__("time").time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except Exception:
-            # Ne jamais faire échouer le traitement à cause du logging de debug
-            pass
-
-        # 5. Charger le module de traitement
+        # 9. Charger le module de traitement
         module = load_script_module(script_name, base_path)
 
-        # 6. Vérifier que le module a une fonction run
         if not hasattr(module, 'run'):
             raise AttributeError(f"Le module {script_name} doit exposer une fonction 'run(config)'")
 
-        # 7. Exécuter le pipeline
-        logger.info(f"Démarrage du traitement: {config.get('id', 'N/A')}")
+        # 10. State log : running
+        _write_state_log(state_log_path, {"status": "running", "id": config_id})
+
+        # 11. Exécuter le pipeline
+        logger.info(f"Démarrage du traitement: {config_id}")
         logger.info(f"Description: {config.get('description', 'N/A')}")
 
         summary = module.run(config)
 
-        # 8. Afficher le résumé
+        # 12. Afficher le résumé
         print_summary(summary)
 
-        # 9. Code de retour
+        # 13. State log : completed ou error
         if summary.get('failed_files'):
+            _write_state_log(state_log_path, {
+                "status": "error", "id": config_id,
+                "summary": {
+                    "total_files": summary.get("total_files", 0),
+                    "processed": len(summary.get("processed_files", [])),
+                    "failed": len(summary.get("failed_files", [])),
+                },
+            })
             return 1
+
+        _write_state_log(state_log_path, {
+            "status": "completed", "id": config_id,
+            "summary": {
+                "total_files": summary.get("total_files", 0),
+                "processed": len(summary.get("processed_files", [])),
+                "failed": 0,
+                "rows_before": summary.get("total_rows_before", 0),
+                "rows_after": summary.get("total_rows_after", 0),
+            },
+        })
         return 0
 
     except Exception as e:
         logger.error(f"Erreur fatale lors de l'exécution de {config_path}: {e}", exc_info=True)
         print(f"\n❌ Erreur: {e}\n", file=sys.stderr)
+        _write_state_log(state_log_path, {
+            "status": "error", "id": config_id or "unknown",
+            "error": str(e),
+        })
         return 1
 
 

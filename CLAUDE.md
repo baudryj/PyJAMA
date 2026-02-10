@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 PyJAMA is a reproducible IoT data processing pipeline framework for biological signal data (valvometry), environmental context, and device telemetry. Configuration is JSON-driven — if a pipeline can't be understood by reading its JSON config, it doesn't belong in PyJAMA.
 
-**Dependencies:** polars (≥0.20.0), psycopg2-binary (≥2.9.0). Install with `./manager.sh install pyjama` or `pip install -r requirements.txt`.
+**Dependencies:** polars (≥0.20.0), psycopg2-binary (≥2.9.0), pytest (for tests). Install with `./manager.sh install pyjama` or `pip install -r requirements.txt`.
 
 ## Commands
 
@@ -23,7 +23,7 @@ python3 drawer.py run <pipeline.json> [--from DATE] [--to DATE] [--mode auto]
 ./manager.sh delete <EXPOSURE>    # remove (after archiving)
 ```
 
-There are no automated tests. The `tests/` directory is empty. Manual testing is done by running pipelines against sample configs in `configs/sample/`.
+Tests: `python3 -m pytest tests/ -v`. The `tests/test_config_v2.py` file covers the v2→v1 config adapter. Integration testing is done by running pipelines against configs in `configs/PREMANIP_GRACE/`.
 
 ## Architecture
 
@@ -47,7 +47,8 @@ Each exposure processes data through numbered stages in `data/<EXPOSURE>/`:
 
 ### Execution Model
 
-- **pyjama.py** — loads a JSON config, resolves placeholders (`{NOW}`, `{NOW_DATETIME}`, `{FROM}`, `{TO}`), dynamically imports the script module from `scripts/`, calls its `run(config)` function.
+- **pyjama.py** — loads a JSON config, resolves placeholders (`{NOW}`, `{NOW_DATETIME}`, `{FROM}`, `{TO}`), detects config version (v1/v2), adapts v2→v1 via `config_v2.py`, dynamically imports the script module from `scripts/`, calls its `run(config)` function. Writes JSONL state logs if `state.log` is defined in the config.
+- **config_v2.py** — adapter module: `detect_version(config)` returns `"v1"` or `"v2"`, `adapt_v2_to_v1(config)` converts v2 configs to v1 format so existing scripts work unchanged.
 - **drawer.py** — reads a pipeline JSON (`drawer` name + `items` array of `{run, with}` pairs), delegates each step to `pyjama.run_script()` sequentially.
 - `--mode auto` sets `config["output"]["database"]["auto_mode"] = "max_ts"` for database import steps (80/81).
 
@@ -110,6 +111,23 @@ All configs share a common shape:
 ```
 
 Database configs (80/81) add `output.database` with `driver`, `table_name`, `parameters` (host/port/dbname/user), `password_env` (env var name, typically `POSTGRES_PASSWORD`), `autocreate`, `schema`, `indexes`.
+
+### Config v2 Schema
+
+v2 configs separate concerns into 5 blocks: `mode`, `input`, `output`, `transform`, `state`. See `docs/config-v2-schema.md` for the full spec. The adapter in `config_v2.py` converts v2→v1 transparently — scripts never see v2.
+
+```json
+{
+  "id": "...", "version": "v2", "description": "...",
+  "mode": { "type": "batch|batch_fixed|diff|realtime" },
+  "input": { "source": "files", "files": { "directory": "...", "pattern": "...", "recursive": false, "timestamp_column": "Time" } },
+  "output": { "target": "files|database", "files": { "directory": "...", "suffix": "...", ... }, "database": { ... } },
+  "transform": { ... },
+  "state": { "log": "logs/EXPOSURE/step.log" }
+}
+```
+
+Key v2→v1 mappings: `input.files.directory` → `input.input_directory`, `input.files.recursive` → `search_in_subdirectory` ("yes"/"no"), `output.files.suffix` gets `_{NOW_DATETIME}` auto-appended, `output.database.table` → `table_name`, `output.database.connection` → `parameters`, `mode.type=diff` → `output.database.auto_mode`, transform keys are promoted to root or input/output as needed.
 
 ## Key Patterns
 
